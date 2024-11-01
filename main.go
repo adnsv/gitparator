@@ -1,10 +1,11 @@
-// gitparator.go
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,7 +26,8 @@ var appVer string = ""
 type Config struct {
 	Version          string   `mapstructure:"version"`
 	TargetURL        string   `mapstructure:"target_url"`
-	TargetPath       string   `mapstructure:"target_path"` // New field
+	TargetPath       string   `mapstructure:"target_path"`
+	TargetZip        string   `mapstructure:"target_zip"` // New field
 	Branch           string   `mapstructure:"branch"`
 	Tag              string   `mapstructure:"tag"`
 	TempDir          string   `mapstructure:"temp_dir"`
@@ -62,6 +64,7 @@ func main() {
 
 	rootCmd.Flags().StringP("target-url", "u", "", "URL of the target repository")
 	rootCmd.Flags().StringP("target-path", "p", "", "Path to the target repository")
+	rootCmd.Flags().StringP("target-zip", "z", "", "Path to the zipped target repository") // New flag
 	rootCmd.Flags().StringP("branch", "b", "", "Branch to compare (default is main)")
 	rootCmd.Flags().StringP("tag", "t", "", "Tag to compare")
 	rootCmd.Flags().StringP("temp-dir", "", "gitparator_temp", "Temporary directory for cloning")
@@ -73,6 +76,7 @@ func main() {
 	// Bind flags with viper
 	viper.BindPFlag("target_url", rootCmd.Flags().Lookup("target-url"))
 	viper.BindPFlag("target_path", rootCmd.Flags().Lookup("target-path"))
+	viper.BindPFlag("target_zip", rootCmd.Flags().Lookup("target-zip")) // New binding
 	viper.BindPFlag("branch", rootCmd.Flags().Lookup("branch"))
 	viper.BindPFlag("tag", rootCmd.Flags().Lookup("tag"))
 	viper.BindPFlag("temp_dir", rootCmd.Flags().Lookup("temp-dir"))
@@ -154,8 +158,36 @@ func checkConfigVersion(configVersion string) error {
 
 func runMain(config *Config) {
 	// Validate required configurations
-	if config.TargetPath != "" {
+	if config.TargetZip != "" {
+		// TargetZip is specified, use the zip file as the target repository
+		if config.TargetURL != "" || config.TargetPath != "" {
+			fmt.Println("Error: Only one of --target-url, --target-path, or --target-zip should be specified.")
+			os.Exit(1)
+		}
+		if config.Branch != "" || config.Tag != "" {
+			fmt.Println("Warning: --branch and --tag options are ignored when --target-zip is specified.")
+		}
+		if _, err := os.Stat(config.TargetZip); os.IsNotExist(err) {
+			fmt.Printf("Error: target zip file '%s' does not exist.\n", config.TargetZip)
+			os.Exit(1)
+		}
+
+		// Compare repositories
+		result := compareWithZip(".", config.TargetZip, config)
+
+		// Generate HTML report
+		if err := generateHTMLReport(result, config.OutputFile); err != nil {
+			log.Fatalf("Error generating HTML report: %v", err)
+		}
+
+		fmt.Printf("Comparison complete. Report generated as %s\n", config.OutputFile)
+		return
+	} else if config.TargetPath != "" {
 		// TargetPath is specified, use the local directory
+		if config.TargetURL != "" {
+			fmt.Println("Error: Only one of --target-url, --target-path, or --target-zip should be specified.")
+			os.Exit(1)
+		}
 		if config.Branch != "" || config.Tag != "" {
 			fmt.Println("Warning: --branch and --tag options are ignored when --target-path is specified.")
 		}
@@ -163,6 +195,17 @@ func runMain(config *Config) {
 			fmt.Printf("Error: target path '%s' does not exist.\n", config.TargetPath)
 			os.Exit(1)
 		}
+
+		// Compare repositories
+		result := compareRepos(".", config.TargetPath, config)
+
+		// Generate HTML report
+		if err := generateHTMLReport(result, config.OutputFile); err != nil {
+			log.Fatalf("Error generating HTML report: %v", err)
+		}
+
+		fmt.Printf("Comparison complete. Report generated as %s\n", config.OutputFile)
+		return
 	} else if config.TargetURL != "" {
 		// TargetURL is specified, clone the repository
 		if config.TempDir == "" {
@@ -185,22 +228,9 @@ func runMain(config *Config) {
 		fmt.Printf("Comparison complete. Report generated as %s\n", config.OutputFile)
 		return
 	} else {
-		fmt.Println("Error: either --target-url or --target-path must be specified.")
+		fmt.Println("Error: one of --target-url, --target-path, or --target-zip must be specified.")
 		os.Exit(1)
 	}
-
-	// Use the target path as the target directory
-	targetDir := config.TargetPath
-
-	// Compare repositories
-	result := compareRepos(".", targetDir, config)
-
-	// Generate HTML report
-	if err := generateHTMLReport(result, config.OutputFile); err != nil {
-		log.Fatalf("Error generating HTML report: %v", err)
-	}
-
-	fmt.Printf("Comparison complete. Report generated as %s\n", config.OutputFile)
 }
 
 func cloneRepo(config *Config, targetDir string) error {
@@ -225,9 +255,28 @@ func compareRepos(sourceDir, targetDir string, config *Config) ComparisonResult 
 		Diffs: make(map[string]string),
 	}
 
-	sourceFiles := getAllFiles(sourceDir, config.ExcludePaths, config.RespectGitignore)
-	targetFiles := getAllFiles(targetDir, config.ExcludePaths, config.RespectGitignore)
+	sourceFiles := getAllFilesFromDir(sourceDir, config.ExcludePaths, config.RespectGitignore)
+	targetFiles := getAllFilesFromDir(targetDir, config.ExcludePaths, config.RespectGitignore)
 
+	compareFileLists(sourceFiles, targetFiles, sourceDir, targetDir, config, &result)
+
+	return result
+}
+
+func compareWithZip(sourceDir, zipPath string, config *Config) ComparisonResult {
+	result := ComparisonResult{
+		Diffs: make(map[string]string),
+	}
+
+	sourceFiles := getAllFilesFromDir(sourceDir, config.ExcludePaths, config.RespectGitignore)
+	targetFiles := getAllFilesFromZip(zipPath, config.ExcludePaths, config.RespectGitignore)
+
+	compareFileLists(sourceFiles, targetFiles, sourceDir, zipPath, config, &result)
+
+	return result
+}
+
+func compareFileLists(sourceFiles, targetFiles []string, sourceDir, targetDir string, config *Config, result *ComparisonResult) {
 	sourceMap := make(map[string]string)
 	targetMap := make(map[string]string)
 
@@ -262,10 +311,11 @@ func compareRepos(sourceDir, targetDir string, config *Config) ComparisonResult 
 		result.TargetOnlyFiles = append(result.TargetOnlyFiles, path)
 	}
 
-	return result
+	// Handle empty and missing folders
+	// This example does not list directories, so empty directories are not compared
 }
 
-func getAllFiles(dir string, excludePaths []string, respectGitignore bool) []string {
+func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool) []string {
 	var files []string
 	var gitignorePatterns []string
 
@@ -282,6 +332,8 @@ func getAllFiles(dir string, excludePaths []string, respectGitignore bool) []str
 		if relativePath == "" {
 			return nil
 		}
+		relativePath = strings.TrimPrefix(relativePath, string(os.PathSeparator))
+
 		if shouldExclude(relativePath, excludePaths) || shouldExclude(relativePath, gitignorePatterns) {
 			return nil
 		}
@@ -293,6 +345,35 @@ func getAllFiles(dir string, excludePaths []string, respectGitignore bool) []str
 	})
 	if err != nil {
 		log.Printf("Error walking through files: %v", err)
+	}
+	return files
+}
+
+func getAllFilesFromZip(zipPath string, excludePaths []string, respectGitignore bool) []string {
+	var files []string
+	var gitignorePatterns []string
+
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		log.Fatalf("Error opening zip file: %v", err)
+	}
+	defer r.Close()
+
+	if respectGitignore {
+		gitignorePatterns = parseGitignoreFromZip(r)
+	}
+
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		relativePath := f.Name
+
+		if shouldExclude(relativePath, excludePaths) || shouldExclude(relativePath, gitignorePatterns) {
+			continue
+		}
+
+		files = append(files, f.Name)
 	}
 	return files
 }
@@ -323,6 +404,31 @@ func parseGitignore(dir string) []string {
 	return patterns
 }
 
+func parseGitignoreFromZip(r *zip.ReadCloser) []string {
+	var patterns []string
+	for _, f := range r.File {
+		if f.Name == ".gitignore" {
+			rc, err := f.Open()
+			if err != nil {
+				return patterns
+			}
+			defer rc.Close()
+
+			scanner := bufio.NewScanner(rc)
+			for scanner.Scan() {
+				line := scanner.Text()
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				patterns = append(patterns, line)
+			}
+			break
+		}
+	}
+	return patterns
+}
+
 func shouldExclude(path string, patterns []string) bool {
 	for _, pattern := range patterns {
 		matched, _ := doublestar.PathMatch(pattern, path)
@@ -334,8 +440,22 @@ func shouldExclude(path string, patterns []string) bool {
 }
 
 func filesAreEqual(file1, file2 string) bool {
-	content1, err1 := os.ReadFile(file1)
-	content2, err2 := os.ReadFile(file2)
+	var content1, content2 []byte
+	var err1, err2 error
+
+	if strings.HasSuffix(file1, ".zip") {
+		// Read from zip file
+		content1, err1 = readFileFromZip(file1)
+	} else {
+		content1, err1 = os.ReadFile(file1)
+	}
+
+	if strings.HasSuffix(file2, ".zip") {
+		// Read from zip file
+		content2, err2 = readFileFromZip(file2)
+	} else {
+		content2, err2 = os.ReadFile(file2)
+	}
 
 	if err1 != nil || err2 != nil {
 		return false
@@ -344,9 +464,55 @@ func filesAreEqual(file1, file2 string) bool {
 	return string(content1) == string(content2)
 }
 
+func readFileFromZip(zipFilePath string) ([]byte, error) {
+	// Extract the zip path and the file inside the zip
+	zipPath, filePath := splitZipPath(zipFilePath)
+
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	for _, f := range r.File {
+		if f.Name == filePath {
+			rc, err := f.Open()
+			if err != nil {
+				return nil, err
+			}
+			defer rc.Close()
+
+			return io.ReadAll(rc)
+		}
+	}
+
+	return nil, fmt.Errorf("file %s not found in zip archive", filePath)
+}
+
+func splitZipPath(zipFilePath string) (zipPath, filePath string) {
+	// For simplicity, assume that zipFilePath is in the format "zipfile.zip::filepath"
+	parts := strings.SplitN(zipFilePath, "::", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
+
 func getFileDiff(file1, file2 string) string {
-	content1, err1 := os.ReadFile(file1)
-	content2, err2 := os.ReadFile(file2)
+	var content1, content2 []byte
+	var err1, err2 error
+
+	if strings.HasSuffix(file1, ".zip") {
+		content1, err1 = readFileFromZip(file1)
+	} else {
+		content1, err1 = os.ReadFile(file1)
+	}
+
+	if strings.HasSuffix(file2, ".zip") {
+		content2, err2 = readFileFromZip(file2)
+	} else {
+		content2, err2 = os.ReadFile(file2)
+	}
 
 	if err1 != nil || err2 != nil {
 		return "Error reading files for diff"
