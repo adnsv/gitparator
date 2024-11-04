@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 
+	_ "embed"
+
 	"github.com/adnsv/gitparator/gitignore"
 	"github.com/blang/semver/v4"
 	"github.com/bmatcuk/doublestar/v4"
@@ -29,7 +31,7 @@ type Config struct {
 	Version          string   `mapstructure:"version"`
 	TargetURL        string   `mapstructure:"target_url"`
 	TargetPath       string   `mapstructure:"target_path"`
-	TargetZip        string   `mapstructure:"target_zip"` // New field
+	TargetZip        string   `mapstructure:"target_zip"`
 	Branch           string   `mapstructure:"branch"`
 	Tag              string   `mapstructure:"tag"`
 	TempDir          string   `mapstructure:"temp_dir"`
@@ -44,11 +46,15 @@ type ComparisonResult struct {
 	DifferentFiles  []string
 	SourceOnlyFiles []string
 	TargetOnlyFiles []string
-	ExcludedFiles   []string
+	SourceExcluded  []string
+	TargetExcluded  []string
 	Diffs           map[string]string
 }
 
 const defaultConfigFileBase = ".gitparator" // no trailing .yaml or .yml here
+
+//go:embed templates/report.html
+var reportTemplate string
 
 func main() {
 	var config Config
@@ -271,10 +277,16 @@ func compareRepos(sourceDir, targetDir string, config *Config) ComparisonResult 
 		Diffs: make(map[string]string),
 	}
 
-	sourceFiles := getAllFilesFromDir(sourceDir, config.ExcludePaths, config.RespectGitignore)
-	targetFiles := getAllFilesFromDir(targetDir, config.ExcludePaths, config.RespectGitignore)
+	sourceFiles, sourceExcluded := getAllFilesFromDir(sourceDir, config.ExcludePaths, config.RespectGitignore)
+	targetFiles, targetExcluded := getAllFilesFromDir(targetDir, config.ExcludePaths, config.RespectGitignore)
 
 	compareFileLists(sourceFiles, targetFiles, sourceDir, targetDir, config, &result)
+
+	// Add excluded files to the result
+	result.SourceExcluded = sourceExcluded
+	result.TargetExcluded = targetExcluded
+	sort.Strings(result.SourceExcluded)
+	sort.Strings(result.TargetExcluded)
 
 	return result
 }
@@ -284,10 +296,16 @@ func compareWithZip(sourceDir, zipPath string, config *Config) ComparisonResult 
 		Diffs: make(map[string]string),
 	}
 
-	sourceFiles := getAllFilesFromDir(sourceDir, config.ExcludePaths, config.RespectGitignore)
-	targetFiles := getAllFilesFromZip(zipPath, config.ExcludePaths, config.RespectGitignore)
+	sourceFiles, sourceExcluded := getAllFilesFromDir(sourceDir, config.ExcludePaths, config.RespectGitignore)
+	targetFiles, targetExcluded := getAllFilesFromZip(zipPath, config.ExcludePaths, config.RespectGitignore)
 
 	compareFileLists(sourceFiles, targetFiles, sourceDir, zipPath, config, &result)
+
+	// Add excluded files to the result
+	result.SourceExcluded = sourceExcluded
+	result.TargetExcluded = targetExcluded
+	sort.Strings(result.SourceExcluded)
+	sort.Strings(result.TargetExcluded)
 
 	return result
 }
@@ -342,14 +360,14 @@ func compareFileLists(sourceFiles, targetFiles []string, sourceDir, targetDir st
 	sort.Strings(result.TargetOnlyFiles)
 }
 
-func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool) []string {
+func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool) ([]string, []string) {
 	var files []string
+	var excludedFiles []string
 	dir = filepath.Clean(dir)
 	gitignoreStack := gitignore.NewStack(dir)
 
 	var scanDir func(path string) error
 	scanDir = func(path string) error {
-		// First, check for .gitignore in current directory
 		if respectGitignore {
 			gitignorePath := filepath.Join(path, ".gitignore")
 			if patterns, err := parseGitignore(gitignorePath); err == nil {
@@ -363,53 +381,46 @@ func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool
 			return err
 		}
 
-		// First process directories
+		// Process directories and files
 		for _, entry := range entries {
-			if entry.IsDir() && entry.Name() != ".git" {
-				fullPath := filepath.Join(path, entry.Name())
-				relativePath, err := filepath.Rel(dir, fullPath)
-				if err != nil {
-					log.Printf("Error getting relative path: %v", err)
+			fullPath := filepath.Join(path, entry.Name())
+			relativePath, err := filepath.Rel(dir, fullPath)
+			if err != nil {
+				log.Printf("Error getting relative path: %v", err)
+				continue
+			}
+			relativePath = toSlash(relativePath)
+
+			if entry.IsDir() {
+				if entry.Name() == ".git" {
 					continue
 				}
-				// Normalize to forward slashes for pattern matching
-				relativePath = toSlash(relativePath)
 
 				if shouldExclude(relativePath, excludePaths) {
+					excludedFiles = append(excludedFiles, relativePath)
 					continue
 				}
 
 				if respectGitignore && gitignoreStack.ShouldIgnore(fullPath) {
+					excludedFiles = append(excludedFiles, relativePath)
 					continue
 				}
 
 				if err := scanDir(fullPath); err != nil {
 					return err
 				}
-			}
-		}
-
-		// Then process files
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				fullPath := filepath.Join(path, entry.Name())
-				relativePath, err := filepath.Rel(dir, fullPath)
-				if err != nil {
-					log.Printf("Error getting relative path: %v", err)
-					continue
-				}
-				// Normalize to forward slashes for pattern matching
-				relativePath = toSlash(relativePath)
-
+			} else {
 				if entry.Name() == ".gitignore" {
 					continue
 				}
 
 				if shouldExclude(relativePath, excludePaths) {
+					excludedFiles = append(excludedFiles, relativePath)
 					continue
 				}
 
 				if respectGitignore && gitignoreStack.ShouldIgnore(fullPath) {
+					excludedFiles = append(excludedFiles, relativePath)
 					continue
 				}
 
@@ -425,7 +436,7 @@ func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool
 		log.Printf("Error walking through files: %v", err)
 	}
 
-	return files
+	return files, excludedFiles
 }
 
 func parseGitignore(path string) ([]string, error) {
@@ -453,8 +464,9 @@ func parseGitignore(path string) ([]string, error) {
 	return patterns, scanner.Err()
 }
 
-func getAllFilesFromZip(zipPath string, excludePaths []string, respectGitignore bool) []string {
+func getAllFilesFromZip(zipPath string, excludePaths []string, respectGitignore bool) ([]string, []string) {
 	var files []string
+	var excludedFiles []string
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		log.Fatalf("Error opening zip file: %v", err)
@@ -506,26 +518,29 @@ func getAllFilesFromZip(zipPath string, excludePaths []string, respectGitignore 
 
 	// Process all files
 	for _, f := range r.File {
+		name := toSlash(f.Name)
 		if f.FileInfo().IsDir() {
 			continue
 		}
 
-		if filepath.Base(f.Name) == ".gitignore" {
+		if filepath.Base(name) == ".gitignore" {
 			continue
 		}
 
-		if shouldExclude(f.Name, excludePaths) {
+		if shouldExclude(name, excludePaths) {
+			excludedFiles = append(excludedFiles, name)
 			continue
 		}
 
-		if shouldIgnoreInZip(f.Name) {
+		if shouldIgnoreInZip(name) {
+			excludedFiles = append(excludedFiles, name)
 			continue
 		}
 
-		files = append(files, f.Name)
+		files = append(files, name)
 	}
 
-	return files
+	return files, excludedFiles
 }
 
 func parseGitignoreFromZipFile(f *zip.File) ([]string, error) {
@@ -640,141 +655,80 @@ func getFileDiff(file1, file2 string) string {
 	}
 
 	dmp := diffmatchpatch.New()
-	diffs := dmp.DiffMain(string(content1), string(content2), false)
-	diffHTML := dmp.DiffPrettyHtml(diffs)
 
-	// Wrap in a div for styling
-	return fmt.Sprintf("<div class=\"diff-content\">%s</div>", diffHTML)
+	// Create line-based diffs
+	chars1, chars2, linePatches := dmp.DiffLinesToChars(string(content1), string(content2))
+	lineDiffs := dmp.DiffMain(chars1, chars2, false)
+	lines := dmp.DiffCharsToLines(lineDiffs, linePatches)
+
+	// Generate HTML output
+	var html strings.Builder
+	html.WriteString("<div class=\"diff-content\">")
+
+	lineNum1 := 1
+	lineNum2 := 1
+
+	for _, diff := range lines {
+		diffLines := strings.Split(diff.Text, "\n")
+		for i, line := range diffLines {
+			if i == len(diffLines)-1 && line == "" {
+				continue // Skip empty line at the end
+			}
+
+			escapedLine := template.HTMLEscapeString(line)
+			switch diff.Type {
+			case diffmatchpatch.DiffDelete:
+				html.WriteString(fmt.Sprintf("<div class=\"diff-line diff-deleted\"><span class=\"line-num\">%d</span><span class=\"diff-marker\">-</span>%s</div>",
+					lineNum1, escapedLine))
+				lineNum1++
+			case diffmatchpatch.DiffInsert:
+				html.WriteString(fmt.Sprintf("<div class=\"diff-line diff-inserted\"><span class=\"line-num\">%d</span><span class=\"diff-marker\">+</span>%s</div>",
+					lineNum2, escapedLine))
+				lineNum2++
+			case diffmatchpatch.DiffEqual:
+				html.WriteString(fmt.Sprintf("<div class=\"diff-line diff-equal\"><span class=\"line-num\">%d</span><span class=\"diff-marker\"> </span>%s</div>",
+					lineNum1, escapedLine))
+				lineNum1++
+				lineNum2++
+			}
+		}
+	}
+
+	html.WriteString("</div>")
+	return html.String()
 }
 
 func generateHTMLReport(result ComparisonResult, outputFile string) error {
-	tmpl := `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Gitparator Report</title>
-    <style>
-        body { font-family: Arial, sans-serif; background-color: #f8f9fa; margin: 20px; }
-        h1 { color: #343a40; }
-        h2 { color: #495057; }
-        ul { list-style-type: none; padding: 0; }
-        li { padding: 5px; }
-        .identical { color: #28a745; }
-        .different { color: #dc3545; }
-        .source-only { color: #007bff; }
-        .target-only { color: #fd7e14; }
-        .summary { 
-            background-color: #fff;
-            border-radius: 8px;
-            padding: 20px;
-            margin: 20px 0;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .summary-item {
-            display: inline-block;
-            margin-right: 30px;
-            text-align: center;
-        }
-        .summary-count {
-            font-size: 24px;
-            font-weight: bold;
-            margin-bottom: 5px;
-        }
-        .diff-content { 
-            background-color: #f1f1f1; 
-            padding: 10px; 
-            margin-top: 5px; 
-            border-radius: 5px; 
-            overflow-x: auto; 
-        }
-        .diff-deleted { background-color: #ffe6e6; }
-        .diff-inserted { background-color: #e6ffe6; }
-        pre { white-space: pre-wrap; word-wrap: break-word; }
-    </style>
-</head>
-<body>
-    <h1>Gitparator Comparison Report</h1>
-    
-    <div class="summary">
-        <div class="summary-item">
-            <div class="summary-count identical">{{len .IdenticalFiles}}</div>
-            <div>Identical Files</div>
-        </div>
-        <div class="summary-item">
-            <div class="summary-count different">{{len .DifferentFiles}}</div>
-            <div>Different Files</div>
-        </div>
-        <div class="summary-item">
-            <div class="summary-count source-only">{{len .SourceOnlyFiles}}</div>
-            <div>Source Only</div>
-        </div>
-        <div class="summary-item">
-            <div class="summary-count target-only">{{len .TargetOnlyFiles}}</div>
-            <div>Target Only</div>
-        </div>
-        <div class="summary-item">
-            <div class="summary-count" style="color: #6c757d;">{{len .ExcludedFiles}}</div>
-            <div>Excluded Files</div>
-        </div>
-        <div class="summary-item">
-            <div class="summary-count" style="color: #6c757d;">{{add (add (add (len .IdenticalFiles) (len .DifferentFiles)) (len .SourceOnlyFiles)) (len .TargetOnlyFiles)}}</div>
-            <div>Total Files</div>
-        </div>
-    </div>
-
-    <h2>Identical Files</h2>
-    <ul>
-        {{- range .IdenticalFiles}}
-        <li class="identical">{{.}}</li>
-        {{- end}}
-    </ul>
-    <h2>Different Files</h2>
-    <ul>
-        {{- range .DifferentFiles}}
-        <li class="different">{{.}}
-            {{- if (index $.Diffs .)}}
-                {{index $.Diffs .}}
-            {{- end}}
-        </li>
-        {{- end}}
-    </ul>
-    <h2>Files Only in Source Repository</h2>
-    <ul>
-        {{- range .SourceOnlyFiles}}
-        <li class="source-only">{{.}}</li>
-        {{- end}}
-    </ul>
-    <h2>Files Only in Target Repository</h2>
-    <ul>
-        {{- range .TargetOnlyFiles}}
-        <li class="target-only">{{.}}</li>
-        {{- end}}
-    </ul>
-    <h2>Excluded Files</h2>
-    <ul>
-        {{- range .ExcludedFiles}}
-        <li style="color: #6c757d;">{{.}}</li>
-        {{- end}}
-    </ul>
-</body>
-</html>
-`
-	// Create a template with the add function
+	// Create template functions
 	funcMap := template.FuncMap{
-		"add": func(a, b int) int { return a + b },
-	}
-	t, err := template.New("report").Funcs(funcMap).Parse(tmpl)
-	if err != nil {
-		return err
+		"add":      func(a, b int) int { return a + b },
+		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
+		"countDiffStats": func(diff string) string {
+			additions := strings.Count(diff, "diff-inserted")
+			deletions := strings.Count(diff, "diff-deleted")
+			return fmt.Sprintf("+%d -%d", additions, deletions)
+		},
 	}
 
+	// Create and parse template
+	t, err := template.New("report").Funcs(funcMap).Parse(reportTemplate)
+	if err != nil {
+		return fmt.Errorf("error parsing template: %w", err)
+	}
+
+	// Create output file
 	f, err := os.Create(outputFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("error creating output file: %w", err)
 	}
 	defer f.Close()
 
-	return t.Execute(f, result)
+	// Execute template
+	if err := t.Execute(f, result); err != nil {
+		return fmt.Errorf("error executing template: %w", err)
+	}
+
+	return nil
 }
 
 // Non-essential utilities moved to the end of the file

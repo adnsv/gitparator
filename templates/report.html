@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Gitparator Report</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            background-color: #f8f9fa; 
+            margin: 20px;
+            color: #212529;
+        }
+        h1 { 
+            color: #343a40;
+            margin-bottom: 30px;
+        }
+        h2 { 
+            color: #495057;
+            margin-top: 30px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #dee2e6;
+        }
+        ul { 
+            list-style-type: none; 
+            padding: 0;
+            margin: 0;
+        }
+        li { 
+            padding: 8px;
+            margin: 4px 0;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+        li:hover {
+            background-color: #f1f3f5;
+        }
+        .identical { color: #28a745; }
+        .different { color: #dc3545; }
+        .source-only { color: #007bff; }
+        .target-only { color: #fd7e14; }
+        .excluded { color: #6c757d; }
+        
+        .summary { 
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .summary ul {
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+        .summary li {
+            margin: 8px 0;
+            font-size: 16px;
+        }
+        .summary span {
+            font-weight: bold;
+            margin-left: 8px;
+        }
+        
+        .diff-content { 
+            background-color: #f8f9fa; 
+            padding: 0;
+            margin: 10px 0;
+            border-radius: 8px;
+            overflow-x: auto;
+            border: 1px solid #dee2e6;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .diff-line {
+            padding: 0;
+            margin: 0;
+            white-space: pre;
+            display: flex;
+        }
+        
+        .diff-line:hover {
+            background-color: #f1f3f5;
+        }
+        
+        .line-num {
+            color: #6c757d;
+            padding: 0 8px;
+            text-align: right;
+            min-width: 40px;
+            user-select: none;
+            border-right: 1px solid #dee2e6;
+        }
+        
+        .diff-marker {
+            padding: 0 8px;
+            user-select: none;
+            color: #495057;
+        }
+        
+        .diff-deleted { 
+            background-color: #ffeef0;
+        }
+        
+        .diff-deleted .diff-marker {
+            color: #dc3545;
+        }
+        
+        .diff-inserted { 
+            background-color: #e6ffec;
+        }
+        
+        .diff-inserted .diff-marker {
+            color: #28a745;
+        }
+
+        .diff-equal {
+            background-color: transparent;
+        }
+        
+        .diff-chunk {
+            border-bottom: 1px solid #dee2e6;
+            padding: 8px 0;
+        }
+        
+        .diff-chunk:last-child {
+            border-bottom: none;
+        }
+        
+        pre { 
+            white-space: pre-wrap; 
+            word-wrap: break-word;
+            margin: 0;
+        }
+        
+        .section {
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .disclosure-button {
+            background: none;
+            border: none;
+            color: inherit;
+            cursor: pointer;
+            padding: 4px 8px;
+            font-size: 14px;
+            border-radius: 4px;
+        }
+        
+        .disclosure-button:hover {
+            background-color: rgba(0,0,0,0.05);
+        }
+
+        .diff-container {
+            display: none;
+            margin: 10px 0;
+        }
+
+        .diff-container.show {
+            display: block;
+        }
+
+        .sticky-header {
+            position: sticky;
+            top: 0;
+            background: white;
+            z-index: 100;
+            padding: 20px;
+            border-bottom: 1px solid #dee2e6;
+        }
+
+        .file-stats {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .stat-box {
+            padding: 15px;
+            border-radius: 8px;
+            min-width: 200px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .search-box {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .collapse-all {
+            padding: 8px 16px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .file-path {
+            font-family: 'Courier New', monospace;
+        }
+
+        .diff-stats {
+            font-size: 0.9em;
+            color: #6c757d;
+            margin-left: 10px;
+        }
+
+        .source-only {
+            color: #d73a49;  /* red for deletions */
+            padding: 8px;
+            border-radius: 4px;
+        }
+
+        .target-only {
+            color: #28a745;  /* green for additions */
+            padding: 8px;
+            border-radius: 4px;
+        }
+
+        .stat-box.source-only {
+            background-color: #ffdce0;
+            border: 1px solid #d73a49;
+        }
+
+        .stat-box.target-only {
+            background-color: #dcffe4;
+            border: 1px solid #28a745;
+        }
+    </style>
+</head>
+<body>
+    <div class="sticky-header">
+        <h1>Gitparator Comparison Report</h1>
+        
+        <div class="file-stats">
+            <div class="stat-box identical">
+                <div>Identical Files</div>
+                <strong>{{len .IdenticalFiles}}</strong>
+            </div>
+            <div class="stat-box different">
+                <div>Different Files</div>
+                <strong>{{len .DifferentFiles}}</strong>
+            </div>
+            <div class="stat-box source-only">
+                <div>Source Only</div>
+                <strong>{{len .SourceOnlyFiles}}</strong>
+            </div>
+            <div class="stat-box target-only">
+                <div>Target Only</div>
+                <strong>{{len .TargetOnlyFiles}}</strong>
+            </div>
+        </div>
+
+        <input type="text" class="search-box" placeholder="Search files..." onkeyup="filterFiles(this.value)">
+    </div>
+
+    <div class="section">
+        <div class="section-header">
+            <h2>Different Files</h2>
+            <button class="collapse-all" onclick="toggleAllDiffs()">Collapse All</button>
+        </div>
+        <ul>
+            {{- range .DifferentFiles}}
+            <li class="file-item">
+                <div class="different">
+                    <button class="disclosure-button" onclick="toggleDiff('diff-{{.}}')">▶</button>
+                    <span class="file-path">{{.}}</span>
+                    {{- if (index $.Diffs .)}}
+                    <span class="diff-stats">{{countDiffStats (index $.Diffs .)}}</span>
+                    {{- end}}
+                </div>
+                {{- if (index $.Diffs .)}}
+                <div id="diff-{{.}}" class="diff-container">
+                    {{index $.Diffs . | printf "%s" | safeHTML}}
+                </div>
+                {{- end}}
+            </li>
+            {{- end}}
+        </ul>
+    </div>
+
+    <div class="section">
+        <div class="section-header">
+            <h2>Source Only Files</h2>
+        </div>
+        <ul>
+            {{- range .SourceOnlyFiles}}
+            <li class="file-item">
+                <div class="source-only">
+                    <span class="file-path">{{.}}</span>
+                </div>
+            </li>
+            {{- end}}
+        </ul>
+    </div>
+
+    <div class="section">
+        <div class="section-header">
+            <h2>Target Only Files</h2>
+        </div>
+        <ul>
+            {{- range .TargetOnlyFiles}}
+            <li class="file-item">
+                <div class="target-only">
+                    <span class="file-path">{{.}}</span>
+                </div>
+            </li>
+            {{- end}}
+        </ul>
+    </div>
+
+    <script>
+    function filterFiles(query) {
+        query = query.toLowerCase();
+        document.querySelectorAll('.file-item').forEach(item => {
+            const filePath = item.querySelector('.file-path').textContent.toLowerCase();
+            item.style.display = filePath.includes(query) ? '' : 'none';
+        });
+    }
+
+    let allExpanded = false;
+    function toggleAllDiffs() {
+        const button = document.querySelector('.collapse-all');
+        allExpanded = !allExpanded;
+        button.textContent = allExpanded ? 'Collapse All' : 'Expand All';
+        
+        document.querySelectorAll('.diff-container').forEach(container => {
+            const button = container.previousElementSibling.querySelector('.disclosure-button');
+            if (allExpanded) {
+                container.classList.add('show');
+                button.textContent = '▼';
+            } else {
+                container.classList.remove('show');
+                button.textContent = '▶';
+            }
+        });
+    }
+
+    function toggleDiff(id) {
+        const container = document.getElementById(id);
+        const button = container.previousElementSibling.querySelector('.disclosure-button');
+        if (container.classList.contains('show')) {
+            container.classList.remove('show');
+            button.textContent = '▶';
+        } else {
+            container.classList.add('show');
+            button.textContent = '▼';
+        }
+    }
+    </script>
+</body>
+</html> 
