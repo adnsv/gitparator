@@ -343,77 +343,91 @@ func compareFileLists(sourceFiles, targetFiles []string, sourceDir, targetDir st
 
 func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool) []string {
 	var files []string
-	var gitignorePatterns []string
+	gitignoreStack := NewGitignoreStack(dir)
 
-	if respectGitignore {
-		gitignorePatterns = parseGitignore(dir)
-	}
+	// Define a function to scan directories
+	var scanDir func(path string) error
+	scanDir = func(path string) error {
+		// First, check for .gitignore in current directory
+		if respectGitignore {
+			gitignorePath := filepath.Join(path, ".gitignore")
+			if patterns, err := parseGitignore(gitignorePath); err == nil {
+				gitignoreStack.PushPatterns(patterns)
+				defer gitignoreStack.PopPatterns() // Remove patterns when leaving this directory
+			}
+		}
 
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		// Read directory entries
+		entries, err := os.ReadDir(path)
 		if err != nil {
 			return err
 		}
 
-		relativePath := strings.TrimPrefix(path, dir)
-		if relativePath == "" {
-			return nil
-		}
-		relativePath = strings.TrimPrefix(relativePath, string(os.PathSeparator))
+		// First process directories
+		for _, entry := range entries {
+			if entry.IsDir() && entry.Name() != ".git" {
+				fullPath := filepath.Join(path, entry.Name())
+				relativePath := strings.TrimPrefix(fullPath, dir)
+				relativePath = strings.TrimPrefix(relativePath, string(os.PathSeparator))
 
-		if shouldExclude(relativePath, excludePaths) || shouldExclude(relativePath, gitignorePatterns) {
-			return nil
+				if shouldExclude(relativePath, excludePaths) {
+					continue
+				}
+
+				if respectGitignore && gitignoreStack.ShouldIgnore(fullPath) {
+					continue
+				}
+
+				if err := scanDir(fullPath); err != nil {
+					return err
+				}
+			}
 		}
 
-		if !info.IsDir() && !strings.Contains(path, ".git"+string(os.PathSeparator)) {
-			files = append(files, path)
+		// Then process files
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				fullPath := filepath.Join(path, entry.Name())
+				relativePath := strings.TrimPrefix(fullPath, dir)
+				relativePath = strings.TrimPrefix(relativePath, string(os.PathSeparator))
+
+				if entry.Name() == ".gitignore" {
+					continue // Skip .gitignore files as we've already processed them
+				}
+
+				if shouldExclude(relativePath, excludePaths) {
+					continue
+				}
+
+				if respectGitignore && gitignoreStack.ShouldIgnore(fullPath) {
+					continue
+				}
+
+				files = append(files, fullPath)
+			}
 		}
+
 		return nil
-	})
+	}
+
+	// Start scanning from the root directory
+	err := scanDir(dir)
 	if err != nil {
 		log.Printf("Error walking through files: %v", err)
 	}
+
 	return files
 }
 
-func getAllFilesFromZip(zipPath string, excludePaths []string, respectGitignore bool) []string {
-	var files []string
-	var gitignorePatterns []string
-
-	r, err := zip.OpenReader(zipPath)
-	if err != nil {
-		log.Fatalf("Error opening zip file: %v", err)
-	}
-	defer r.Close()
-
-	if respectGitignore {
-		gitignorePatterns = parseGitignoreFromZip(r)
-	}
-
-	for _, f := range r.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		relativePath := f.Name
-
-		if shouldExclude(relativePath, excludePaths) || shouldExclude(relativePath, gitignorePatterns) {
-			continue
-		}
-
-		files = append(files, f.Name)
-	}
-	return files
-}
-
-func parseGitignore(dir string) []string {
+func parseGitignore(path string) ([]string, error) {
 	var patterns []string
-	gitignorePath := filepath.Join(dir, ".gitignore")
-	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
-		return patterns
-	}
 
-	file, err := os.Open(gitignorePath)
+	file, err := os.Open(path)
 	if err != nil {
-		return patterns
+		if os.IsNotExist(err) {
+			return patterns, nil
+		}
+		return patterns, err
 	}
 	defer file.Close()
 
@@ -427,32 +441,106 @@ func parseGitignore(dir string) []string {
 		patterns = append(patterns, line)
 	}
 
-	return patterns
+	return patterns, scanner.Err()
 }
 
-func parseGitignoreFromZip(r *zip.ReadCloser) []string {
-	var patterns []string
-	for _, f := range r.File {
-		if f.Name == ".gitignore" {
-			rc, err := f.Open()
-			if err != nil {
-				return patterns
-			}
-			defer rc.Close()
+func getAllFilesFromZip(zipPath string, excludePaths []string, respectGitignore bool) []string {
+	var files []string
+	r, err := zip.OpenReader(zipPath)
+	if err != nil {
+		log.Fatalf("Error opening zip file: %v", err)
+	}
+	defer r.Close()
 
-			scanner := bufio.NewScanner(rc)
-			for scanner.Scan() {
-				line := scanner.Text()
-				line = strings.TrimSpace(line)
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
+	// First, gather all .gitignore files and their contents
+	gitignorePatterns := make(map[string][]string)
+	if respectGitignore {
+		for _, f := range r.File {
+			if filepath.Base(f.Name) == ".gitignore" {
+				dirPath := filepath.Dir(f.Name)
+				if patterns, err := parseGitignoreFromZipFile(f); err == nil {
+					gitignorePatterns[dirPath] = patterns
 				}
-				patterns = append(patterns, line)
 			}
-			break
 		}
 	}
-	return patterns
+
+	// Helper function to check if a file should be ignored
+	shouldIgnoreInZip := func(path string) bool {
+		if !respectGitignore {
+			return false
+		}
+
+		// Check patterns from all parent directories
+		dir := filepath.Dir(path)
+		for dir != "." && dir != "/" {
+			if patterns, exists := gitignorePatterns[dir]; exists {
+				relPath, _ := filepath.Rel(dir, path)
+				for _, pattern := range patterns {
+					if matched, _ := doublestar.PathMatch(pattern, relPath); matched {
+						return true
+					}
+				}
+			}
+			dir = filepath.Dir(dir)
+		}
+
+		// Check root patterns
+		if patterns, exists := gitignorePatterns["."]; exists {
+			for _, pattern := range patterns {
+				if matched, _ := doublestar.PathMatch(pattern, path); matched {
+					return true
+				}
+			}
+		}
+
+		return false
+	}
+
+	// Process all files
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+
+		if filepath.Base(f.Name) == ".gitignore" {
+			continue
+		}
+
+		if shouldExclude(f.Name, excludePaths) {
+			continue
+		}
+
+		if shouldIgnoreInZip(f.Name) {
+			continue
+		}
+
+		files = append(files, f.Name)
+	}
+
+	return files
+}
+
+func parseGitignoreFromZipFile(f *zip.File) ([]string, error) {
+	var patterns []string
+
+	rc, err := f.Open()
+	if err != nil {
+		return patterns, err
+	}
+	defer rc.Close()
+
+	scanner := bufio.NewScanner(rc)
+	for scanner.Scan() {
+		line := scanner.Text()
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+
+	return patterns, scanner.Err()
 }
 
 func shouldExclude(path string, patterns []string) bool {
