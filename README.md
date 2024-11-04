@@ -83,7 +83,7 @@ Gitparator supports an optional configuration file in YAML format. By default, i
  
 - `tag` (string, optional): Tag to compare (ignored if `target_path` is specified).
  
-- `temp_dir` (string, optional): Temporary directory for cloning the target repository. Defaults to `gitparator_temp` (ignored if `target_path` is specified).
+- `temp_dir` (string, optional): Temporary directory for cloning the target repository. Defaults to `.gitparator_temp` (ignored if `target_path` is specified).
  
 - `output_file` (string, optional): Output report file name. Defaults to `report.html`.
  
@@ -102,7 +102,7 @@ version: ">=1.0.0"
 target_path: '/path/to/local/target-repo'
 # target_url: 'https://github.com/username/target-repo.git' # Ignored when target_path is specified
 branch: 'develop'  # Ignored when target_path is specified
-temp_dir: 'temp_clone'  # Ignored when target_path is specified
+temp_dir: '.gitparator_temp'  # Ignored when target_path is specified
 output_file: 'comparison_report.html'
 exclude_paths:
   - 'logs/**'
@@ -214,10 +214,5 @@ This project is licensed under the MIT License. See the [LICENSE]()  file for de
 ### Version Compatibility 
  
 - **Version Field in Configuration** : The `version` field in the configuration file is required and ensures that the configuration is compatible with the version of Gitparator you are running.
- 
-- **Semantic Versioning** : Gitparator uses semantic versioning (SemVer) for version numbers. The application uses the `github.com/blang/semver/v4` package for parsing and comparing versions.
- 
-- **Example Version Expression** : 
-  - `">=1.0.0"`
- 
+  
 - **Error Handling** : If the application version does not satisfy the version constraint specified in the configuration file, Gitparator will display an error and exit.

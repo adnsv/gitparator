@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 
 	"github.com/blang/semver/v4"
@@ -44,27 +45,73 @@ type ComparisonResult struct {
 	Diffs           map[string]string
 }
 
+const defaultConfigFileBase = ".gitparator" // no trailing .yaml or .yml here
+
 func main() {
-	var cfgFile string
 	var config Config
 
 	rootCmd := &cobra.Command{
 		Use:     "gitparator",
 		Short:   "Gitparator is a tool for comparing two Git repositories",
 		Version: appVersion(),
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Handle config file loading
+			configFile, _ := cmd.Flags().GetString("config")
+			configLoadedFromFile := false
+			if configFile != "" {
+				// Config file explicitly specified
+				viper.SetConfigFile(configFile)
+				if err := viper.ReadInConfig(); err != nil {
+					// Return error if specified config file cannot be loaded
+					return fmt.Errorf("error reading config: %w", err)
+				}
+				configLoadedFromFile = true
+			} else {
+				// Try default config file
+				viper.SetConfigName(defaultConfigFileBase)
+				viper.SetConfigType("yaml")
+				viper.AddConfigPath(".")
+
+				// Silently ignore if default config file is not found
+				if err := viper.ReadInConfig(); err != nil {
+					if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+						// Return error only if it's not a file-not-found error
+						return fmt.Errorf("error reading default config file: %w", err)
+					}
+					// Default config file not found - proceed silently
+				} else {
+					configLoadedFromFile = true
+				}
+			}
+
+			if configLoadedFromFile {
+				fmt.Println("Using config file:", viper.ConfigFileUsed())
+
+				// Unmarshal config
+				if err := viper.Unmarshal(&config); err != nil {
+					return fmt.Errorf("failed to parse config file: %w", err)
+				}
+
+				err := checkConfigVersion(config.Version)
+				if err != nil {
+					return fmt.Errorf("configuration file version error: %w", err)
+				}
+
+			}
+			return nil
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			runMain(&config)
 		},
 	}
 
 	// Define flags and configuration settings
-	rootCmd.Flags().StringVarP(&cfgFile, "config", "c", "", "config file (default is .gitparator.yaml in current directory)")
-
+	rootCmd.Flags().StringP("config", "c", "", fmt.Sprintf("config file (default is %s.yaml in current directory)", defaultConfigFileBase))
 	rootCmd.Flags().StringP("target-url", "u", "", "URL of the target repository")
 	rootCmd.Flags().StringP("target-path", "p", "", "Path to the target repository")
-	rootCmd.Flags().StringP("branch", "b", "", "Branch to compare (default is main)")
+	rootCmd.Flags().StringP("branch", "b", "", "Branch to compare")
 	rootCmd.Flags().StringP("tag", "t", "", "Tag to compare")
-	rootCmd.Flags().StringP("temp-dir", "", "gitparator_temp", "Temporary directory for cloning")
+	rootCmd.Flags().StringP("temp-dir", "", ".gitparator_temp", "Temporary directory for cloning")
 	rootCmd.Flags().StringP("output-file", "o", "report.html", "Output report file")
 	rootCmd.Flags().StringSliceP("exclude-paths", "e", []string{}, "Paths to exclude")
 	rootCmd.Flags().BoolP("respect-gitignore", "", true, "Respect .gitignore rules")
@@ -81,47 +128,16 @@ func main() {
 	viper.BindPFlag("respect_gitignore", rootCmd.Flags().Lookup("respect-gitignore"))
 	viper.BindPFlag("detailed_diff", rootCmd.Flags().Lookup("detailed-diff"))
 
-	// Read in config file and ENV variables if set
-	cobra.OnInitialize(func() { initConfig(cfgFile) })
-
+	// Parse the flags first
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 
-	// Unmarshal configuration into Config struct
-	if err := viper.Unmarshal(&config); err != nil {
-		fmt.Printf("Error parsing configuration: %v\n", err)
+	// Execute the command
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
 		os.Exit(1)
-	}
-
-	// Check configuration file version compatibility
-	if err := checkConfigVersion(config.Version); err != nil {
-		fmt.Printf("Configuration file version error: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-func initConfig(cfgFile string) {
-	if cfgFile != "" {
-		// Use config file from the flag
-		viper.SetConfigFile(cfgFile)
-	} else {
-		// Search for config file in the current directory with name ".gitparator"
-		viper.AddConfigPath(".")
-		viper.SetConfigName(".gitparator")
-	}
-
-	viper.SetConfigType("yaml")
-
-	// Read in environment variables that match
-	viper.AutomaticEnv()
-
-	// If a config file is found, read it in
-	if err := viper.ReadInConfig(); err == nil {
-		fmt.Println("Using config file:", viper.ConfigFileUsed())
-	} else {
-		fmt.Println("No config file found, using CLI flags and defaults")
 	}
 }
 
@@ -132,21 +148,26 @@ func checkConfigVersion(configVersion string) error {
 
 	appVerStr := appVersion()
 	if appVerStr == "#UNAVAILABLE" {
-		return fmt.Errorf("application version is unavailable")
+		// we are running an unversioned build, so we can't check the version
+		return nil
 	}
 
-	appSemVer, err := semver.Parse(appVerStr)
+	appSemVer, err := semver.ParseTolerant(appVerStr)
 	if err != nil {
 		return fmt.Errorf("invalid application version: %v", err)
 	}
 
-	versionRange, err := semver.ParseRange(configVersion)
-	if err != nil {
-		return fmt.Errorf("invalid version constraint in configuration file: %v", err)
+	if configVersion == "" {
+		return fmt.Errorf("configuration file does not specify a version")
 	}
 
-	if !versionRange(appSemVer) {
-		return fmt.Errorf("application version %s does not satisfy constraint %s", appSemVer, configVersion)
+	configFileVersion, err := semver.ParseTolerant(configVersion)
+	if err != nil {
+		return fmt.Errorf("configuration file version is not a valid semantic version: %v", err)
+	}
+
+	if configFileVersion.Compare(appSemVer) > 0 {
+		return fmt.Errorf("configuration file requires gitparator version >= %s", configFileVersion)
 	}
 
 	return nil
@@ -232,12 +253,20 @@ func compareRepos(sourceDir, targetDir string, config *Config) ComparisonResult 
 	targetMap := make(map[string]string)
 
 	for _, file := range sourceFiles {
-		relativePath := strings.TrimPrefix(file, sourceDir)
+		relativePath, err := filepath.Rel(sourceDir, file)
+		if err != nil {
+			log.Printf("Error getting relative path for %s: %v", file, err)
+			continue
+		}
 		sourceMap[relativePath] = file
 	}
 
 	for _, file := range targetFiles {
-		relativePath := strings.TrimPrefix(file, targetDir)
+		relativePath, err := filepath.Rel(targetDir, file)
+		if err != nil {
+			log.Printf("Error getting relative path for %s: %v", file, err)
+			continue
+		}
 		targetMap[relativePath] = file
 	}
 
@@ -261,6 +290,12 @@ func compareRepos(sourceDir, targetDir string, config *Config) ComparisonResult 
 	for path := range targetMap {
 		result.TargetOnlyFiles = append(result.TargetOnlyFiles, path)
 	}
+
+	// Sort all slices for consistent output
+	sort.Strings(result.IdenticalFiles)
+	sort.Strings(result.DifferentFiles)
+	sort.Strings(result.SourceOnlyFiles)
+	sort.Strings(result.TargetOnlyFiles)
 
 	return result
 }
