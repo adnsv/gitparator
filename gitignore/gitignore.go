@@ -12,7 +12,7 @@ type Stack struct {
 	basePath string
 }
 
-func New(basePath string) *Stack {
+func NewStack(basePath string) *Stack {
 	basePath = filepath.ToSlash(basePath)
 	return &Stack{
 		patterns: make([][]string, 0),

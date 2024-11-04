@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/adnsv/gitparator/gitignore"
 	"github.com/blang/semver/v4"
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/go-git/go-git/v5"
@@ -343,7 +344,7 @@ func compareFileLists(sourceFiles, targetFiles []string, sourceDir, targetDir st
 
 func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool) []string {
 	var files []string
-	gitignoreStack := NewGitignoreStack(dir)
+	gitignoreStack := gitignore.NewStack(dir)
 
 	// Define a function to scan directories
 	var scanDir func(path string) error

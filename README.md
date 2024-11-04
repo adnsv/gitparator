@@ -98,7 +98,7 @@ Gitparator supports an optional configuration file in YAML format. By default, i
 
 ```yaml
 # .gitparator.yaml
-version: "0.1.0"
+version: "1.0.0"
 target_path: '/path/to/local/target-repo'
 # target_url: 'https://github.com/username/target-repo.git' # Ignored when target_path is specified
 branch: 'develop'  # Ignored when target_path is specified
@@ -183,11 +183,11 @@ gitparator --version
  
 - `-z, --target-zip` (string): Path to the zipped target repository.
  
-- `-b, --branch` (string): Branch to compare (ignored if `--target-path` or `--target-zip` is specified).
+- `-b, --branch` (string): Branch to compare (default is `main`, ignored if `--target-path` or `--target-zip` is specified).
  
 - `-t, --tag` (string): Tag to compare (ignored if `--target-path` or `--target-zip` is specified).
  
-- `--temp-dir` (string): Temporary directory for cloning (default is `.gitparator_temp`, ignored if `--target-path` or `--target-zip` is specified).
+- `--temp-dir` (string): Temporary directory for cloning (default is `gitparator_temp`, ignored if `--target-path` or `--target-zip` is specified).
  
 - `-o, --output-file` (string): Output report file (default is `report.html`).
  

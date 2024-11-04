@@ -14,7 +14,7 @@ func TestStack_ShouldIgnore(t *testing.T) {
 
 	// Helper function to create a stack with patterns
 	setupStack := func(basePath string, patternLevels ...[]string) *Stack {
-		stack := New(basePath)
+		stack := NewStack(basePath)
 		for _, patterns := range patternLevels {
 			stack.PushPatterns(patterns)
 		}
@@ -306,7 +306,7 @@ func TestStack_ShouldIgnore(t *testing.T) {
 
 // Test pattern stack manipulation
 func TestStack_PatternManipulation(t *testing.T) {
-	stack := New("/project")
+	stack := NewStack("/project")
 
 	// Test pushing patterns
 	patterns1 := []string{"*.txt", "*.log"}
@@ -373,7 +373,7 @@ func TestStack_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stack := New(tt.basePath)
+			stack := NewStack(tt.basePath)
 			stack.PushPatterns(tt.patterns)
 			got := stack.ShouldIgnore(tt.testPath)
 			if got != tt.expectedIgnore {
@@ -424,7 +424,7 @@ func TestStack_PatternOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stack := New(tt.basePath)
+			stack := NewStack(tt.basePath)
 			for _, patterns := range tt.patternLevels {
 				stack.PushPatterns(patterns)
 			}
