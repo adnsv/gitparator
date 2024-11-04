@@ -344,9 +344,9 @@ func compareFileLists(sourceFiles, targetFiles []string, sourceDir, targetDir st
 
 func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool) []string {
 	var files []string
+	dir = filepath.Clean(dir)
 	gitignoreStack := gitignore.NewStack(dir)
 
-	// Define a function to scan directories
 	var scanDir func(path string) error
 	scanDir = func(path string) error {
 		// First, check for .gitignore in current directory
@@ -354,11 +354,10 @@ func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool
 			gitignorePath := filepath.Join(path, ".gitignore")
 			if patterns, err := parseGitignore(gitignorePath); err == nil {
 				gitignoreStack.PushPatterns(patterns)
-				defer gitignoreStack.PopPatterns() // Remove patterns when leaving this directory
+				defer gitignoreStack.PopPatterns()
 			}
 		}
 
-		// Read directory entries
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			return err
@@ -368,8 +367,13 @@ func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool
 		for _, entry := range entries {
 			if entry.IsDir() && entry.Name() != ".git" {
 				fullPath := filepath.Join(path, entry.Name())
-				relativePath := strings.TrimPrefix(fullPath, dir)
-				relativePath = strings.TrimPrefix(relativePath, string(os.PathSeparator))
+				relativePath, err := filepath.Rel(dir, fullPath)
+				if err != nil {
+					log.Printf("Error getting relative path: %v", err)
+					continue
+				}
+				// Normalize to forward slashes for pattern matching
+				relativePath = toSlash(relativePath)
 
 				if shouldExclude(relativePath, excludePaths) {
 					continue
@@ -389,11 +393,16 @@ func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				fullPath := filepath.Join(path, entry.Name())
-				relativePath := strings.TrimPrefix(fullPath, dir)
-				relativePath = strings.TrimPrefix(relativePath, string(os.PathSeparator))
+				relativePath, err := filepath.Rel(dir, fullPath)
+				if err != nil {
+					log.Printf("Error getting relative path: %v", err)
+					continue
+				}
+				// Normalize to forward slashes for pattern matching
+				relativePath = toSlash(relativePath)
 
 				if entry.Name() == ".gitignore" {
-					continue // Skip .gitignore files as we've already processed them
+					continue
 				}
 
 				if shouldExclude(relativePath, excludePaths) {
@@ -404,14 +413,13 @@ func getAllFilesFromDir(dir string, excludePaths []string, respectGitignore bool
 					continue
 				}
 
-				files = append(files, fullPath)
+				files = append(files, toSlash(fullPath))
 			}
 		}
 
 		return nil
 	}
 
-	// Start scanning from the root directory
 	err := scanDir(dir)
 	if err != nil {
 		log.Printf("Error walking through files: %v", err)
@@ -453,12 +461,11 @@ func getAllFilesFromZip(zipPath string, excludePaths []string, respectGitignore 
 	}
 	defer r.Close()
 
-	// First, gather all .gitignore files and their contents
 	gitignorePatterns := make(map[string][]string)
 	if respectGitignore {
 		for _, f := range r.File {
 			if filepath.Base(f.Name) == ".gitignore" {
-				dirPath := filepath.Dir(f.Name)
+				dirPath := toSlash(filepath.Dir(f.Name))
 				if patterns, err := parseGitignoreFromZipFile(f); err == nil {
 					gitignorePatterns[dirPath] = patterns
 				}
@@ -466,7 +473,6 @@ func getAllFilesFromZip(zipPath string, excludePaths []string, respectGitignore 
 		}
 	}
 
-	// Helper function to check if a file should be ignored
 	shouldIgnoreInZip := func(path string) bool {
 		if !respectGitignore {
 			return false
@@ -657,7 +663,30 @@ func generateHTMLReport(result ComparisonResult, outputFile string) error {
         .different { color: #dc3545; }
         .source-only { color: #007bff; }
         .target-only { color: #fd7e14; }
-        .diff-content { background-color: #f1f1f1; padding: 10px; margin-top: 5px; border-radius: 5px; overflow-x: auto; }
+        .summary { 
+            background-color: #fff;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .summary-item {
+            display: inline-block;
+            margin-right: 30px;
+            text-align: center;
+        }
+        .summary-count {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .diff-content { 
+            background-color: #f1f1f1; 
+            padding: 10px; 
+            margin-top: 5px; 
+            border-radius: 5px; 
+            overflow-x: auto; 
+        }
         .diff-deleted { background-color: #ffe6e6; }
         .diff-inserted { background-color: #e6ffe6; }
         pre { white-space: pre-wrap; word-wrap: break-word; }
@@ -665,6 +694,34 @@ func generateHTMLReport(result ComparisonResult, outputFile string) error {
 </head>
 <body>
     <h1>Gitparator Comparison Report</h1>
+    
+    <div class="summary">
+        <div class="summary-item">
+            <div class="summary-count identical">{{len .IdenticalFiles}}</div>
+            <div>Identical Files</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-count different">{{len .DifferentFiles}}</div>
+            <div>Different Files</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-count source-only">{{len .SourceOnlyFiles}}</div>
+            <div>Source Only</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-count target-only">{{len .TargetOnlyFiles}}</div>
+            <div>Target Only</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-count" style="color: #6c757d;">{{len .ExcludedFiles}}</div>
+            <div>Excluded Files</div>
+        </div>
+        <div class="summary-item">
+            <div class="summary-count" style="color: #6c757d;">{{add (add (add (len .IdenticalFiles) (len .DifferentFiles)) (len .SourceOnlyFiles)) (len .TargetOnlyFiles)}}</div>
+            <div>Total Files</div>
+        </div>
+    </div>
+
     <h2>Identical Files</h2>
     <ul>
         {{- range .IdenticalFiles}}
@@ -693,10 +750,20 @@ func generateHTMLReport(result ComparisonResult, outputFile string) error {
         <li class="target-only">{{.}}</li>
         {{- end}}
     </ul>
+    <h2>Excluded Files</h2>
+    <ul>
+        {{- range .ExcludedFiles}}
+        <li style="color: #6c757d;">{{.}}</li>
+        {{- end}}
+    </ul>
 </body>
 </html>
 `
-	t, err := template.New("report").Parse(tmpl)
+	// Create a template with the add function
+	funcMap := template.FuncMap{
+		"add": func(a, b int) int { return a + b },
+	}
+	t, err := template.New("report").Funcs(funcMap).Parse(tmpl)
 	if err != nil {
 		return err
 	}
@@ -721,4 +788,8 @@ func appVersion() string {
 	} else {
 		return "#UNAVAILABLE"
 	}
+}
+
+func toSlash(path string) string {
+	return filepath.ToSlash(path)
 }
